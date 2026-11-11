@@ -1,0 +1,45 @@
+# Ingress for the backend using the "alb" ingress class
+# (AWS Load Balancer Controller).
+#
+# Routing matches the CloudFront /api/* behavior. target-type "instance"
+# sends traffic to the backend-api NodePort (30080) on the worker nodes.
+#
+# In this project the ALB that CloudFront uses is created by Terraform
+# (starttech-infra, modules/eks/alb.tf) and targets NodePort 30080 directly,
+# so CloudFront knows the ALB address at apply time. This Ingress is only
+# acted on if the AWS Load Balancer Controller is installed in the cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: backend-api
+  namespace: starttech
+  labels:
+    app: backend-api
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: instance
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=60
+    alb.ingress.kubernetes.io/tags: Project=starttech,Component=backend-api
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-api
+                port:
+                  number: 80
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: backend-api
+                port:
+                  number: 80

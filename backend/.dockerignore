@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+bin/
+*.test
+*.out
+coverage.*
+docker-compose*.yaml
+mongodb.key
+Makefile
+README.md

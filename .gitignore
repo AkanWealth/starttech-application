@@ -1,0 +1,23 @@
+# Dependencies and builds
+node_modules/
+frontend/dist/
+backend/bin/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Local secrets
+mongodb.key
+mongo-keyfile
+
+.DS_Store
+.idea/
+.vscode/
+.tanstack/
