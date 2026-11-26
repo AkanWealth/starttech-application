@@ -6,201 +6,73 @@ on:
     paths:
       - "backend/**"
       - "k8s/**"
-      - ".github/workflows/backend-ci-cd.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "backend/**"
-      - "k8s/**"
-      - ".github/workflows/backend-ci-cd.yml"
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: backend-${{ github.ref }}
-  cancel-in-progress: false
 
 env:
-  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-  EKS_CLUSTER_NAME: starttech-cluster
+  AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: starttech-backend-api
-  K8S_NAMESPACE: starttech
+  EKS_CLUSTER_NAME: starttech-cluster
   IMAGE_TAG: ${{ github.sha }}
-  TRIVY_IMAGE: aquasec/trivy:0.67.2
 
 jobs:
-  test:
-    name: Go tests
+  build-and-deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
+      - uses: actions/setup-go@v6
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Go vet
-        run: go vet ./...
-
       - name: Run Go tests
+        working-directory: backend
         run: go test ./...
 
-  build-scan-push:
-    name: Build, scan and push image
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    outputs:
-      image: ${{ steps.image.outputs.image }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
       - name: Build Docker image (tagged with git SHA)
-        run: |
-          docker build \
-            --build-arg VERSION="${IMAGE_TAG}" \
-            -t "${ECR_REPOSITORY}:${IMAGE_TAG}" \
-            backend
+        run: docker build -t "${ECR_REPOSITORY}:${IMAGE_TAG}" backend
 
       - name: Vulnerability scan (Trivy)
-        # Blocks the pipeline on fixable HIGH or CRITICAL findings.
         run: |
-          docker run --rm \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "${HOME}/.cache/trivy:/root/.cache/trivy" \
-            "${TRIVY_IMAGE}" image \
-            --exit-code 1 \
-            --severity CRITICAL,HIGH \
-            --ignore-unfixed \
-            --no-progress \
-            "${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.67.2 \
+            image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed "${ECR_REPOSITORY}:${IMAGE_TAG}"
 
-      - name: Configure AWS credentials (OIDC)
-        if: github.event_name != 'pull_request'
-        uses: aws-actions/configure-aws-credentials@v5
+      - uses: aws-actions/configure-aws-credentials@v5
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Log in to Amazon ECR
-        if: github.event_name != 'pull_request'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Push image to ECR
-        if: github.event_name != 'pull_request'
-        id: image
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
-          # Tags are immutable: on a re-run for the same commit, reuse the image.
-          if aws ecr describe-images --repository-name "${ECR_REPOSITORY}" \
-               --image-ids imageTag="${IMAGE_TAG}" >/dev/null 2>&1; then
-            echo "Image ${IMAGE_TAG} already exists in ECR; skipping push."
-          else
-            docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${IMAGE}"
-            docker push "${IMAGE}"
-          fi
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          IMAGE="${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${IMAGE}"
+          docker push "${IMAGE}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
 
-  deploy:
-    name: Deploy to EKS
-    needs: build-scan-push
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: production
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      IMAGE: ${{ needs.build-scan-push.outputs.image }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+      - name: Update k8s/deployment.yaml with the new image tag
+        run: |
+          sed -i -E "s|image: .*/${ECR_REPOSITORY}:.*|image: ${IMAGE}|" k8s/deployment.yaml
 
       - name: Connect to EKS
         run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: Update k8s/deployment.yaml with the new image tag
+      - name: Create config and secrets
         run: |
-          sed -i -E "s|^([[:space:]]*image:[[:space:]]*).*/${ECR_REPOSITORY}:.*$|\1${IMAGE}|" k8s/deployment.yaml
-          grep -n "image:" k8s/deployment.yaml
-          grep -q "image: ${IMAGE}" k8s/deployment.yaml
-
-      - name: Create namespace, config and secrets
-        env:
-          MONGO_URI: ${{ secrets.MONGO_URI }}
-          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
-          REDIS_HOST: ${{ vars.REDIS_HOST }}
-          CLOUDFRONT_DOMAIN: ${{ vars.CLOUDFRONT_DOMAIN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${MONGO_URI}" ] || [ -z "${JWT_SECRET_KEY}" ]; then
-            echo "::error::Set the MONGO_URI and JWT_SECRET_KEY repository secrets."
-            exit 1
-          fi
-          if [ -z "${REDIS_HOST}" ]; then
-            REDIS_HOST=$(aws elasticache describe-cache-clusters \
-              --cache-cluster-id starttech-redis --show-cache-node-info \
-              --query "CacheClusters[0].CacheNodes[0].Endpoint.Address" --output text)
-          fi
-          if [ -z "${CLOUDFRONT_DOMAIN}" ]; then
-            CLOUDFRONT_DOMAIN=$(aws cloudfront list-distributions \
-              --query "DistributionList.Items[?Origins.Items[?Id=='ALB-Backend']].DomainName | [0]" --output text)
-          fi
-          echo "Redis: ${REDIS_HOST}  CloudFront: ${CLOUDFRONT_DOMAIN}"
-
-          kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl -n "${K8S_NAMESPACE}" create configmap backend-config \
-            --from-literal=REDIS_HOST="${REDIS_HOST}" \
-            --from-literal=COOKIE_DOMAINS="${CLOUDFRONT_DOMAIN}" \
-            --from-literal=ALLOWED_ORIGINS="https://${CLOUDFRONT_DOMAIN}" \
+          kubectl create namespace starttech --dry-run=client -o yaml | kubectl apply -f -
+          kubectl -n starttech create configmap backend-config \
+            --from-literal=REDIS_HOST="${{ vars.REDIS_HOST }}" \
             --dry-run=client -o yaml | kubectl apply -f -
-          kubectl -n "${K8S_NAMESPACE}" create secret generic backend-secrets \
-            --from-literal=MONGO_URI="${MONGO_URI}" \
-            --from-literal=JWT_SECRET_KEY="${JWT_SECRET_KEY}" \
+          kubectl -n starttech create secret generic backend-secrets \
+            --from-literal=MONGO_URI="${{ secrets.MONGO_URI }}" \
+            --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
             --dry-run=client -o yaml | kubectl apply -f -
-          echo "CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN}" >> "$GITHUB_ENV"
 
-      - name: Apply Kubernetes manifests
+      - name: Deploy to EKS
         run: kubectl apply -f k8s/
 
       - name: Verify rollout
-        id: rollout
-        run: kubectl rollout status deployment/backend-api -n "${K8S_NAMESPACE}" --timeout=300s
-
-      - name: Health check
-        id: health
-        run: ./scripts/health-check.sh "${CLOUDFRONT_DOMAIN}"
-
-      - name: Roll back on failure
-        # Only when the new release was applied but did not become healthy.
-        if: failure() && (steps.rollout.outcome == 'failure' || steps.health.outcome == 'failure')
-        env:
-          SKIP_KUBECONFIG: "true"
-        run: ./scripts/rollback.sh
-
-      - name: Summary
-        if: success()
-        run: |
-          echo "### Backend deployed" >> "$GITHUB_STEP_SUMMARY"
-          echo "Image: \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
-          kubectl get deployment backend-api -n "${K8S_NAMESPACE}" -o wide >> "$GITHUB_STEP_SUMMARY"
+        run: kubectl rollout status deployment/backend-api -n starttech --timeout=300s

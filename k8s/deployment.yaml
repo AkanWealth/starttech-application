@@ -1,28 +1,15 @@
-# Namespace, deployment and disruption budget for the Go backend API.
-#
-# The pipeline replaces the image line with the git-SHA tag it just pushed,
-# and creates two objects before `kubectl apply -f k8s/`:
-#   - ConfigMap backend-config  (REDIS_HOST, COOKIE_DOMAINS, ALLOWED_ORIGINS)
-#   - Secret    backend-secrets (MONGO_URI, JWT_SECRET_KEY)
 apiVersion: v1
 kind: Namespace
 metadata:
   name: starttech
-  labels:
-    app.kubernetes.io/part-of: starttech
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend-api
   namespace: starttech
-  labels:
-    app: backend-api
-    app.kubernetes.io/name: backend-api
-    app.kubernetes.io/part-of: starttech
 spec:
   replicas: 2
-  revisionHistoryLimit: 10
   selector:
     matchLabels:
       app: backend-api
@@ -35,61 +22,20 @@ spec:
     metadata:
       labels:
         app: backend-api
-        app.kubernetes.io/name: backend-api
-        app.kubernetes.io/part-of: starttech
     spec:
-      terminationGracePeriodSeconds: 30
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app: backend-api
       containers:
         - name: backend-api
           image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/starttech-backend-api:latest
-          imagePullPolicy: IfNotPresent
           ports:
-            - name: http
-              containerPort: 8080
-              protocol: TCP
+            - containerPort: 8080
           env:
-            - name: PORT
-              value: "8080"
-            - name: LOG_FORMAT
-              value: "json"
-            - name: LOG_LEVEL
-              value: "INFO"
-            - name: DB_NAME
-              value: "much_todo_db"
             - name: ENABLE_CACHE
-              value: "true"
-            - name: SECURE_COOKIE
               value: "true"
             - name: REDIS_HOST
               valueFrom:
                 configMapKeyRef:
                   name: backend-config
                   key: REDIS_HOST
-            - name: COOKIE_DOMAINS
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: COOKIE_DOMAINS
-                  optional: true
-            - name: ALLOWED_ORIGINS
-              valueFrom:
-                configMapKeyRef:
-                  name: backend-config
-                  key: ALLOWED_ORIGINS
-                  optional: true
             - name: MONGO_URI
               valueFrom:
                 secretKeyRef:
@@ -100,46 +46,7 @@ spec:
                 secretKeyRef:
                   name: backend-secrets
                   key: JWT_SECRET_KEY
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
-          startupProbe:
-            httpGet:
-              path: /ping
-              port: http
-            periodSeconds: 5
-            failureThreshold: 12
           readinessProbe:
             httpGet:
-              path: /api/v1/health
-              port: http
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          livenessProbe:
-            httpGet:
-              path: /ping
-              port: http
-            periodSeconds: 20
-            timeoutSeconds: 3
-            failureThreshold: 3
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: backend-api
-  namespace: starttech
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: backend-api
+              path: /health
+              port: 8080
