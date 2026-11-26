@@ -14,7 +14,7 @@ REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 IMAGE="${REGISTRY}/starttech-backend-api:$(git -C "$ROOT_DIR" rev-parse HEAD)"
 
 (cd "${ROOT_DIR}/backend" && go test ./...)
-docker build -t "$IMAGE" "${ROOT_DIR}/backend"
+docker build --platform linux/amd64 -t "$IMAGE" "${ROOT_DIR}/backend"
 aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
 docker push "$IMAGE"
 

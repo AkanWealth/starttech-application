@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: backend-api
-          image: ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/starttech-backend-api:latest
+          image: 283083851962.dkr.ecr.us-east-1.amazonaws.com/starttech-backend-api:d48757055c1f2afbe4e3a2d1e3fefe2b10028627
           ports:
             - containerPort: 8080
           env:
